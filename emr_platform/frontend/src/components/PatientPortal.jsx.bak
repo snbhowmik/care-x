@@ -1,0 +1,523 @@
+import React, { useState } from 'react';
+import { Shield, Key, FileText, Share2, Unlock, RefreshCw, XCircle, CheckCircle, Network, ArrowDown, Fingerprint, UserCheck, Trash2, Mail, Lock } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ethers } from 'ethers';
+import HealthRecordArtifact from '../HealthRecord.json';
+import AUTH_DB from '../auth_db.json'; // Simulating secure auth service
+
+const CONTRACT_ADDRESS = "0x7b6FBc5e34Eb7F678127Ee076143b42c6ee2CF80";
+const GANACHE_URL = "http://127.0.0.1:7545";
+
+const PatientPortal = () => {
+    // Auth State
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
+
+    // Crypto State (derived from login)
+    const [walletAddress, setWalletAddress] = useState("");
+    const [privateKey, setPrivateKey] = useState("");
+    const [currentUser, setCurrentUser] = useState(null);
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+    // Data State
+    const [records, setRecords] = useState([]);
+    const [accessList, setAccessList] = useState([]);
+    const [doctorAddress, setDoctorAddress] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [successMsg, setSuccessMsg] = useState(null);
+
+    // Identity Simulation State
+    const [hospitalWallet, setHospitalWallet] = useState(null);
+    const [identitySignature, setIdentitySignature] = useState(null);
+    const [verificationStatus, setVerificationStatus] = useState(null);
+
+    const getProvider = () => {
+        return new ethers.JsonRpcProvider(GANACHE_URL);
+    };
+
+    // 1. Email/Pass Login Wrapper
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setError(null);
+        setLoading(true);
+
+        try {
+            // A. Traditional Auth Check
+            const user = AUTH_DB[email];
+            if (!user) {
+                throw new Error("User not found.");
+            }
+            if (user.password !== password) {
+                throw new Error("Invalid password.");
+            }
+
+            // B. Retrieve Blockchain Credentials (Transparent to User)
+            const userWallet = user.walletAddress;
+            const userKey = user.privateKey;
+
+            setCurrentUser(user);
+            setWalletAddress(userWallet);
+            setPrivateKey(userKey);
+
+            // C. Initialize Blockchain Session
+            const provider = getProvider();
+            const wallet = new ethers.Wallet(userKey, provider);
+            const contract = new ethers.Contract(CONTRACT_ADDRESS, HealthRecordArtifact.abi, wallet);
+
+            setIsAuthenticated(true);
+
+            // D. Fetch Initial Data
+            await Promise.all([
+                fetchRecords(wallet),
+                fetchAccessLogs(contract, userWallet)
+            ]);
+
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Helper: Access Logs
+    const fetchAccessLogs = async (contract, myAddress) => {
+        try {
+            const grantedFilter = contract.filters.DataShared(myAddress, null);
+            const grantedLogs = await contract.queryFilter(grantedFilter);
+            const revokedFilter = contract.filters.DataUnshared(myAddress, null);
+            const revokedLogs = await contract.queryFilter(revokedFilter);
+
+            const accessMap = new Map();
+
+            grantedLogs.forEach(log => {
+                const doctor = log.args[1];
+                const current = accessMap.get(doctor) || { block: 0, active: false };
+                if (log.blockNumber >= current.block) {
+                    accessMap.set(doctor, { block: log.blockNumber, active: true });
+                }
+            });
+
+            revokedLogs.forEach(log => {
+                const doctor = log.args[1];
+                const current = accessMap.get(doctor) || { block: 0, active: false };
+                if (log.blockNumber >= current.block) {
+                    accessMap.set(doctor, { block: log.blockNumber, active: false });
+                }
+            });
+
+            const activeList = Array.from(accessMap.entries())
+                .filter(([_, val]) => val.active)
+                .map(([addr, _]) => addr);
+            setAccessList(activeList);
+
+        } catch (err) {
+            console.error("Error fetching access logs:", err);
+        }
+    };
+
+    // 2. Fetch Records 
+    const fetchRecords = async (wallet) => {
+        try {
+            const contract = new ethers.Contract(CONTRACT_ADDRESS, HealthRecordArtifact.abi, wallet);
+            const result = await contract.getRecords(wallet.address);
+
+            const parsedRecords = result.map(r => ({
+                ipfsHash: r.ipfsHash,
+                timestamp: Number(r.timestamp),
+                isCritical: r.isCritical,
+                deviceId: r.deviceId
+            }));
+
+            setRecords(parsedRecords.reverse());
+
+        } catch (err) {
+            console.error(err);
+            setError("Failed to fetch records. Blockchain denied access?");
+        }
+    };
+
+    // 3. Grant Access
+    const handleGrantAccess = async () => {
+        if (!ethers.isAddress(doctorAddress)) {
+            setError("Invalid Doctor Address");
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        setSuccessMsg(null);
+        try {
+            const provider = getProvider();
+            const wallet = new ethers.Wallet(privateKey, provider);
+            const contract = new ethers.Contract(CONTRACT_ADDRESS, HealthRecordArtifact.abi, wallet);
+            const tx = await contract.grantDataAccess(doctorAddress);
+            await tx.wait();
+
+            setSuccessMsg(`✅ Access Granted to ${doctorAddress.substring(0, 8)}...`);
+            setDoctorAddress("");
+            fetchAccessLogs(contract, wallet.address);
+
+        } catch (err) {
+            console.error(err);
+            setError("Transaction Failed: " + err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // 4. Revoke Access
+    const handleRevokeAccess = async (targetAddress = doctorAddress) => {
+        let actualTarget = typeof targetAddress === 'string' ? targetAddress : doctorAddress;
+
+        if (!ethers.isAddress(actualTarget)) {
+            setError("Invalid Address");
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        setSuccessMsg(null);
+        try {
+            const provider = getProvider();
+            const wallet = new ethers.Wallet(privateKey, provider);
+            const contract = new ethers.Contract(CONTRACT_ADDRESS, HealthRecordArtifact.abi, wallet);
+            const tx = await contract.revokeDataAccess(actualTarget);
+            await tx.wait();
+            setSuccessMsg(`🚫 Access Revoked for ${actualTarget.substring(0, 8)}...`);
+
+            if (actualTarget === doctorAddress) setDoctorAddress("");
+            fetchAccessLogs(contract, wallet.address);
+
+        } catch (err) {
+            setError("Transaction Failed: " + err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // 5. Generate Identity
+    const generateHospitalIdentity = async () => {
+        setLoading(true);
+        const newHospitalWallet = ethers.Wallet.createRandom();
+        setHospitalWallet(newHospitalWallet);
+
+        const masterWallet = new ethers.Wallet(privateKey);
+        const msg = `AUTHORIZE_SUB_IDENTITY:${newHospitalWallet.address}`;
+        const sig = await masterWallet.signMessage(msg);
+
+        setIdentitySignature(sig);
+        setVerificationStatus(null);
+        setLoading(false);
+    };
+
+    // 6. Verify Identity
+    const verifyIdentityLink = async () => {
+        if (!hospitalWallet || !identitySignature) return;
+        const msg = `AUTHORIZE_SUB_IDENTITY:${hospitalWallet.address}`;
+        const recoveredAddress = ethers.verifyMessage(msg, identitySignature);
+        setVerificationStatus(recoveredAddress.toLowerCase() === walletAddress.toLowerCase() ? 'valid' : 'invalid');
+    };
+
+
+    // --- RENDERING ---
+    if (!isAuthenticated) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-screen p-6 relative overflow-hidden">
+                {/* Background Decor */}
+                <div className="absolute top-0 left-0 w-full h-96 bg-primary/10 blur-3xl -translate-y-1/2 pointer-events-none" />
+
+                <Card className="w-full max-w-md glass-card border border-white/10 shadow-2xl relative z-10">
+                    <CardHeader className="text-center pb-6 border-b border-white/5">
+                        <div className="mx-auto bg-primary/10 p-3 rounded-full w-fit mb-4 animate-pulse-glow">
+                            <Shield className="h-8 w-8 text-primary" />
+                        </div>
+                        <CardTitle className="text-2xl font-bold tracking-tight">C.A.R.E. Vault</CardTitle>
+                        <CardDescription>Secure Patient Access Portal</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6 pt-6">
+                        <form onSubmit={handleLogin} className="space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-xs font-medium text-muted-foreground uppercase flex items-center gap-2">
+                                    <Mail className="h-3 w-3" /> Email Address
+                                </label>
+                                <Input
+                                    type="email"
+                                    placeholder="patient@care.x"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    className="bg-black/20 border-white/10"
+                                    required
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-xs font-medium text-muted-foreground uppercase flex items-center gap-2">
+                                    <Lock className="h-3 w-3" /> Password
+                                </label>
+                                <Input
+                                    type="password"
+                                    value={password}
+                                    placeholder="••••••••"
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    className="bg-black/20 border-white/10"
+                                    required
+                                />
+                            </div>
+
+                            {error && <p className="text-destructive text-sm text-center font-medium bg-red-500/10 p-2 rounded">{error}</p>}
+
+                            <Button type="submit" className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-lg shadow-cyan-900/20" disabled={loading}>
+                                {loading ? "Authenticating..." : "Login Securely"}
+                            </Button>
+                        </form>
+                        <div className="text-center">
+                            <Button variant="link" className="text-xs text-muted-foreground" onClick={() => window.history.back()}>
+                                &larr; Return to Role Selection
+                            </Button>
+                        </div>
+
+                        <div className="mt-4 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20 text-[10px] text-blue-200">
+                            <strong>Demo Credentials:</strong><br />
+                            Email: patient@care.x<br />
+                            Pass: password123
+                        </div>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
+
+    // AUTHENTICATED DASHBOARD
+    return (
+        <div className="container mx-auto p-6 space-y-8 max-w-7xl">
+            {/* Header */}
+            <header className="flex flex-col md:flex-row items-start md:items-center justify-between p-6 rounded-2xl glass-card">
+                <div>
+                    <h1 className="text-3xl font-bold flex items-center gap-3 text-gradient">
+                        <Shield className="h-8 w-8 text-primary" />
+                        Health Vault
+                    </h1>
+                    <div className="flex items-center gap-2 mt-2">
+                        <Badge variant="outline" className="font-mono text-xs border-primary/30 text-primary bg-primary/5">
+                            {currentUser?.name || "Patient"}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground font-mono truncate max-w-[200px] hidden md:inline-block">
+                            {walletAddress}
+                        </span>
+                    </div>
+                </div>
+                <div className="flex gap-3 mt-4 md:mt-0">
+                    <Button variant="outline" className="border-white/10 hover:bg-white/5" onClick={() => window.location.reload()}>
+                        <RefreshCw className="h-4 w-4 mr-2" /> Sync Blockchain
+                    </Button>
+                    <Button variant="destructive" onClick={() => setIsAuthenticated(false)}>Log Out</Button>
+                </div>
+            </header>
+
+            <Tabs defaultValue="identity" className="w-full">
+                <TabsList className="grid w-full grid-cols-3 bg-black/20 p-1 rounded-xl">
+                    <TabsTrigger value="identity" className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary">
+                        <Fingerprint className="h-4 w-4 mr-2" /> Identity
+                    </TabsTrigger>
+                    <TabsTrigger value="records" className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary">
+                        <FileText className="h-4 w-4 mr-2" /> Records
+                    </TabsTrigger>
+                    <TabsTrigger value="access" className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary">
+                        <Share2 className="h-4 w-4 mr-2" /> Access
+                    </TabsTrigger>
+                </TabsList>
+
+                {/* TAB 1: IDENTITY HIERARCHY */}
+                <TabsContent value="identity" className="space-y-6 mt-8 animate-in fade-in slide-in-from-bottom-4">
+                    <div className="grid gap-8">
+                        {/* Level 1 */}
+                        <div className="relative">
+                            <Card className="glass-card border-l-4 border-l-primary/50 relative z-10">
+                                <CardHeader>
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <CardTitle className="text-lg text-primary flex items-center gap-2">
+                                                <Key className="h-5 w-5" /> Master Identity (Root)
+                                            </CardTitle>
+                                            <CardDescription>Your sovereign cryptographic identity on the Ethereum blockchain.</CardDescription>
+                                        </div>
+                                        <Badge className="bg-primary/20 text-primary hover:bg-primary/30">SECURE</Badge>
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="bg-black/40 p-3 rounded-lg border border-white/5 font-mono text-sm break-all text-muted-foreground">
+                                        {walletAddress}
+                                    </div>
+                                </CardContent>
+                            </Card>
+                            {/* Connector Line */}
+                            <div className="absolute left-10 top-full h-12 w-0.5 bg-gradient-to-b from-primary/50 to-transparent -z-10" />
+                        </div>
+
+                        {/* Level 2: Generator */}
+                        <div className="pl-10 space-y-4">
+                            {!hospitalWallet ? (
+                                <Button onClick={generateHospitalIdentity} className="w-full h-16 border-dashed border-2 border-primary/30 bg-primary/5 hover:bg-primary/10 text-primary">
+                                    <Network className="mr-2 h-5 w-5" /> Initialize Hospital Identity Layer
+                                </Button>
+                            ) : (
+                                <Card className="glass-card border-l-4 border-l-blue-500/50 ml-4 animate-in fade-in">
+                                    <CardHeader>
+                                        <CardTitle className="text-lg text-blue-400 flex items-center gap-2">
+                                            <Network className="h-5 w-5" /> Hospital Proxy ID
+                                        </CardTitle>
+                                        <CardDescription>Derived identity for medical facility usage.</CardDescription>
+                                    </CardHeader>
+                                    <CardContent className="space-y-4">
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] uppercase text-muted-foreground tracking-wider">Proxy Address</label>
+                                            <div className="bg-black/40 p-2 rounded border border-white/5 font-mono text-xs text-blue-200">
+                                                {hospitalWallet.address}
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] uppercase text-muted-foreground tracking-wider">Cryptographic Proof</label>
+                                            <div className="bg-black/40 p-2 rounded border border-white/5 font-mono text-[10px] text-muted-foreground break-all max-h-20 overflow-y-auto">
+                                                {identitySignature}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center justify-between pt-2">
+                                            <span className="text-xs text-muted-foreground">Status:</span>
+                                            {verificationStatus === 'valid' ? (
+                                                <Badge className="bg-green-500/20 text-green-400 border-green-500/30">
+                                                    <CheckCircle className="h-3 w-3 mr-1" /> Verified Link
+                                                </Badge>
+                                            ) : (
+                                                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={verifyIdentityLink}>
+                                                    Verify Signature
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            )}
+                        </div>
+                    </div>
+                </TabsContent>
+
+                {/* TAB 2: RECORDS */}
+                <TabsContent value="records" className="mt-8 animate-in fade-in slide-in-from-bottom-4">
+                    <div className="flex justify-between items-center mb-6">
+                        <h3 className="text-xl font-semibold flex items-center gap-2">
+                            <FileText className="h-5 w-5 text-primary" /> Medical History
+                        </h3>
+                        <Badge variant="outline" className="font-mono">{records.length} Records found</Badge>
+                    </div>
+
+                    <div className="grid gap-4">
+                        {records.map((rec, i) => (
+                            <Card key={i} className={`glass-card hover:bg-white/5 transition-colors border-l-4 ${rec.isCritical ? 'border-l-red-500' : 'border-l-green-500'}`}>
+                                <CardContent className="p-4 flex flex-col md:flex-row justify-between gap-4">
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            {rec.isCritical ?
+                                                <Badge variant="destructive" className="animate-pulse">CRITICAL ALERT</Badge> :
+                                                <Badge variant="outline" className="text-green-500 border-green-500/30 bg-green-500/10">ROUTINE CHECK</Badge>
+                                            }
+                                            <span className="text-sm text-muted-foreground">
+                                                {new Date(rec.timestamp * 1000).toLocaleString()}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                                            <span className="bg-black/30 px-1 rounded">IPFS CID:</span>
+                                            <span className="truncate max-w-[200px]">{rec.ipfsHash}</span>
+                                        </div>
+                                    </div>
+                                    <Button size="sm" variant="secondary" className="h-8">View Raw Data</Button>
+                                </CardContent>
+                            </Card>
+                        ))}
+                        {records.length === 0 && (
+                            <div className="text-center py-12 text-muted-foreground border-2 border-dashed border-white/10 rounded-xl">
+                                No anchored records found on the blockchain.
+                            </div>
+                        )}
+                    </div>
+                </TabsContent>
+
+                {/* TAB 3: ACCESS */}
+                <TabsContent value="access" className="mt-8 animate-in fade-in slide-in-from-bottom-4">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        {/* Grant Column */}
+                        <Card className="glass-card">
+                            <CardHeader>
+                                <CardTitle className="text-lg">Grant Access</CardTitle>
+                                <CardDescription>Authorize a new doctor or researcher to view your data.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-4">
+                                <div className="space-y-2">
+                                    <label className="text-xs uppercase font-medium text-muted-foreground">Recipient Wallet Address</label>
+                                    <Input
+                                        placeholder="0x..."
+                                        value={doctorAddress}
+                                        onChange={(e) => setDoctorAddress(e.target.value)}
+                                        className="bg-black/20"
+                                    />
+                                </div>
+                                <Button className="w-full bg-primary hover:bg-primary/90 text-primary-foreground" onClick={handleGrantAccess} disabled={loading}>
+                                    <Share2 className="h-4 w-4 mr-2" /> Authorize Access
+                                </Button>
+                                {successMsg && <Alert className="bg-green-500/10 border-green-500/20 text-green-400 p-2"><CheckCircle className="h-4 w-4 inline mr-2" />{successMsg}</Alert>}
+                                {error && <Alert className="bg-red-500/10 border-red-500/20 text-red-400 p-2"><XCircle className="h-4 w-4 inline mr-2" />{error}</Alert>}
+                            </CardContent>
+                        </Card>
+
+                        {/* Active List Column */}
+                        <Card className="glass-card">
+                            <CardHeader>
+                                <CardTitle className="text-lg flex items-center gap-2">
+                                    <UserCheck className="h-5 w-5 text-green-400" /> Active Permissions
+                                </CardTitle>
+                                <CardDescription>Users who currently have read-access to your vault.</CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                                {accessList.length === 0 ? (
+                                    <div className="text-center py-8 text-sm text-muted-foreground">
+                                        No active permissions. Your data is strictly private.
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {accessList.map((addr) => (
+                                            <div key={addr} className="flex items-center justify-between p-3 rounded-lg bg-black/20 border border-white/5 hover:border-primary/30 transition-colors">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="h-8 w-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-[10px] font-bold">
+                                                        {addr.substring(2, 4)}
+                                                    </div>
+                                                    <div className="flex flex-col">
+                                                        <span className="text-xs font-mono text-white">{addr.substring(0, 6)}...{addr.substring(38)}</span>
+                                                        <span className="text-[10px] text-green-400">● Active</span>
+                                                    </div>
+                                                </div>
+                                                <Button
+                                                    size="sm"
+                                                    variant="ghost"
+                                                    className="text-muted-foreground hover:text-red-400 hover:bg-red-500/10 h-8 w-8 p-0"
+                                                    onClick={() => handleRevokeAccess(addr)}
+                                                    title="Revoke Access"
+                                                >
+                                                    <Trash2 className="h-4 w-4" />
+                                                </Button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
+                    </div>
+                </TabsContent>
+            </Tabs>
+        </div>
+    );
+};
+
+export default PatientPortal;
