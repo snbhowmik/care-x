@@ -13,6 +13,8 @@ The system consists of several key components:
     *   **Backend**: FastAPI-based server handling logic and blockchain interaction.
     *   **Frontend**: Vite/React web interface for hospital staff.
 *   **Doctor/Auditor Dashboard**: Streamlit application for clinicians and auditors to view unified data.
+    
+    ![Doctor Dashboard](images/EMR_DASHBOARD.png)
 *   **Patient Dashboard**: Next.js application for patients to manage their records and consent.
 *   **Hardware Gateway**: Python service simulating medical hardware data ingestion.
 *   **IPFS**: Used for distributed storage of large medical files (simulated or actual integration).
@@ -38,6 +40,8 @@ The project uses a centralized `.env` file for configuration.
 2.  Open `.env` and verify the configurations.
     *   **Ganache**: Ensure `NEXT_PUBLIC_BLOCKCHAIN_URL` matches your local Ganache RPC URL (usually `http://127.0.0.1:7545`).
     *   **Accounts**: The `.env.example` comes pre-filled with deterministically generated Ganache accounts (from the mnemonic provided in project docs if applicable). If you use a fresh Ganache workspace, you may need to update these addresses and keys.
+        
+        ![Access Keys](images/ACCESS_KEY.png)
 
 ### 2. Install Dependencies
 
@@ -67,6 +71,8 @@ cd ..
 ### 3. Blockchain Setup
 
 1.  Start your **Ganache** workspace.
+    
+    ![Ganache Workspace](images/GANACHE_WORKSPACE.png)
 2.  Ensure it is running on the port specified in `.env` (default `7545`).
 3.  Deploy the Smart Contracts:
     ```bash
